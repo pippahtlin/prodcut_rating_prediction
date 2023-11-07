@@ -1,0 +1,681 @@
+---
+title: "131 Final Project"
+author: "Pippa Lin"
+date: "UCSB Winter 2023"
+output:
+    html_document:
+      toc: true
+      toc_float: true
+      code_folding: show
+---
+
+# Predicting Perfume Rating On Sephora's Website
+
+![](/Users/pippalin/Desktop/sephora%20fragrance%20sale.webp)
+
+<br>
+
+<br>
+
+## Introduction
+
+Sephora, a French multinational retailer with nearly 340 brands of personal care and beauty products, can be found everywhere today. With online shopping becoming increasingly popular, this project aims to predict fragrance ratings on Sephora's website based on basic information about the product. In the meantime, it may help us better understand what types of perfume is preferred than others.
+
+The data is the result from web scraping the US Sephora website in April 2020, provided by Kaggle, containing 9168 observations and 21 columns: <https://www.kaggle.com/datasets/raghadalharbi/all-products-available-on-sephora-website>
+
+Throughout the project, I will be implementing multiple classification model to yield most accurate model for multi-class classification problem.
+
+![](/Users/pippalin/Desktop/4E742CD7-32C5-4EB7-AC36-251BCF59BCE9.jpg)
+
+<br>
+
+<br>
+
+## Roadmap
+
+Now we have a better idea of the background, let's dive into the technical part of this project. First, I will load the raw data and extract all the perfume data. With our perfume dataset, I will perform exploratory data analysis (EDA) to get an overall understanding of the dataset and browse through the relationship between different variables. During this process, I will make changes to the dataset for better prediction performance. With the final dataset, I will split them into training and testing sample, build four classification models, select the best model using the training data through cross-validation, and show the best model. At the end, I will fit best model on the testing set to evaluate the prediction reliability of our final model.
+
+<br>
+
+<br>
+
+## Data Preparation
+
+```{r message=FALSE}
+library(tidymodels)
+library(ISLR)
+library(ISLR2)
+library(tidyverse)
+library(discrim)
+library(modeldata)
+library(ggthemes)
+library(naniar) # to assess missing data patterns
+library(corrplot) # for a correlation plot
+library(patchwork) # for putting plots together
+library(rpart.plot)
+library(themis)
+library(vip)
+tidymodels_prefer()
+```
+
+**First, extract all the perfume from the raw dataset**
+
+```{r}
+# Load the whole data
+data <- read.csv('/Users/pippalin/Desktop/Pippa_131_project/data/unprocessed/sephora_website_dataset.csv')
+
+# Select category = perfume
+perfume <- data[data$category %in% c("Perfume"),] 
+dim(perfume)
+```
+
+Now we have a 665 observations with 6 predictors, which is much fewer than the raw data!
+
+<br>
+
+**Now take a look at how many ratings do we have in total:**
+
+```{r}
+table(perfume$rating)
+```
+
+Since there are too many discrete `ratings` which is hard to handle, we can divide them into three `levels`: low median and high.
+
+```{r}
+perfume$rating <- as.factor(perfume$rating)
+perfume <- perfume %>%
+  mutate(level = forcats::fct_collapse(rating,
+                                        low = c(0,1,2),
+                                        median = c(2.5,3,3.5),
+                                        high = c(4,4.5,5))) %>% select(-c(rating))
+```
+
+<br>
+
+**Now we want to remove some unecessary variables.**
+
+First we need to remove variables with different long texts, since we haven't learned any language model. And then we want to remove `id` since it is shows no information. At last, the factor variable `MarketingFlags` combines information of `online` and `exclusive`, which is repetitive, so we remove it too.
+
+```{r}
+perfume <- perfume[,!names(perfume) %in% c("id", "name", "size","URL","options","MarketingFlags_content","options","details","how_to_use","ingredients","MarketingFlags","category")]
+```
+
+<br>
+
+Note that we have predictor `brand` and here we decide whether to keep it or not.
+
+```{r}
+print(length(unique(perfume$brand)))
+```
+
+There are 76 brands. However, I cannot group them into like ratings, because grouping brands is very subjective and the standard affects prediction result significantly; so we can remove the predictor `brand`.
+
+```{r}
+perfume <- perfume[,!names(perfume) %in% c("brand")]
+```
+
+<br>
+
+**For convenience, I want to change some dummy variables to factors for plotting:**
+
+```{r}
+perfume <- perfume %>% mutate(online = as.factor(online_only), 
+                               exclusives = as.factor(exclusive), 
+                               limit = as.factor(limited_edition),
+                               limitoffer = as.factor(limited_time_offer)
+                              ) %>% select(-c(online_only,exclusive,limited_edition,limited_time_offer))
+```
+
+<br>
+
+**View the variables:**
+
+Now we have removed some unnecessary variables, we can take a look at what we have left:
+
+-   `level`: The rating level of a perfume ( low: 0-2, median: 2.5-3.5, high: 4-5)
+
+-   `number_of_reviews`: Total number of reviews of a perfume
+
+-   `love`: Total number of love (likes) of a perfume.
+
+-   `price`: Price of a perfume (in dollars)
+
+-   `value_price`: The value price of the product (for discounted products)
+
+-   `online`: If the product is sold online only (0 = no, 1 = yes)
+
+-   `exclusives`: If the product is sold exclusively on Sephora's website (0 = no, 1 = yes)
+
+-   `limit`: If the product is limited edition (0 = no, 1 = yes)
+
+-   `limitoffer`: If the product has a limited time offer (0 = no, 1 = yes)
+
+<br>
+
+<br>
+
+## Exploratory Data Analysis and Data Processing
+
+**Check if there is missing data:**
+
+```{r warning=FALSE}
+vis_miss(perfume)
+```
+
+No missing value. What a gift from Kaggle!
+
+<br>
+
+**Correlation plot:**
+
+```{r}
+perfume %>% 
+  select(is.numeric) %>% 
+  cor(use = "pairwise.complete.obs") %>% 
+  corrplot(type = "lower", diag = FALSE, method = 'number') 
+```
+
+Since predictor price and value_price have perfect positive correlation, we remove price.
+
+```{r}
+perfume <- perfume[,!names(perfume) %in% c("price")]
+dim(perfume)
+```
+
+<br>
+
+**Visualize response value `level`:**
+
+```{r}
+perfume %>% 
+  ggplot(aes(x = level)) +
+  geom_bar() 
+```
+
+This sample is heavily imbalanced, we need to do resampling in our recipe.
+
+<br>
+
+**Visualize our relationship between variables:**
+
+**- `Levels`, `love`, and `reviews`:**
+
+```{r warning=FALSE}
+perfume %>% ggplot(aes(x = number_of_reviews, y = love, color = level)) + geom_point(alpha = 1/2) + scale_x_continuous(trans='log10') + scale_y_continuous(trans='log10') 
+```
+
+While there is a lot of overlap, we can still see that low level perfumes tend to have low amounts of love and reviews. However, as love and reviews increase, median perfumes and high number products become entwined, suggesting that it is difficult to predict high levels using only love and reviews.
+
+<br>
+
+**- `Levels` and `price`:**
+
+```{r}
+perfume %>% ggplot(aes(y = value_price,x = level)) +
+  stat_summary(fun = "mean", geom = "bar", 
+               position = "dodge") + theme_bw()
+```
+
+We can see a slight trend that lower level perfume have a higher mean price; people are more critical of expensive stuff =)
+
+<br>
+
+**- `Levels` and `online only`:**
+
+```{r}
+ggplot(perfume, aes(fill = online,y = 665, x=level)) + 
+  geom_bar(position="fill", stat="identity")
+```
+
+For low-rating perfume, a slightly larger proportion of products are online-only. For median and high ratings, perfumes that can be bought both at store and online have a much larger proportion.
+
+<br>
+
+**- `Levels` and `exclusive`**
+
+```{r}
+ggplot(perfume, aes(fill = exclusives,y = 665, x=level)) + 
+  geom_bar(position="fill", stat="identity")
+```
+
+Most of the perfumes are not sold exclusively in Sephora, and there are no low-rated exclusive perfume in our data.
+
+<br>
+
+**- `Levels` and `limit`**
+
+```{r}
+ggplot(perfume, aes(fill = limit,y = 665, x=level)) + 
+  geom_bar(position="fill", stat="identity")
+```
+
+Similar to exclusives, we can see that most of the products are not limited edition. However, low-rated perfumes has a slightly larger proportion of limit edition perfume than the other levels.
+
+<br>
+
+**- `Levels` and `limitoffer`**
+
+```{r}
+ggplot(perfume, aes(fill = limitoffer,y = 665, x=level)) + 
+  geom_bar(position="fill", stat="identity")
+```
+
+Wow! No perfume from this data contains product that is sold in a specific period, so we can remove this predictor.
+
+```{r}
+perfume <- perfume[,!names(perfume) %in% c("limitoffer")]
+```
+
+<br>
+
+After EDA, we took out two more predictors, so the following 6 are our finalized predictors:
+
+-   `number_of_reviews`: Total number of reviews of a perfume
+
+-   `love`: Total number of love (likes) of a perfume
+
+-   `value_price`: The value price of the product (for discounted products)
+
+-   `online`: If the product is sold online only (0 = no, 1 = yes)
+
+-   `exclusives`: If the product is sold exclusively on Sephora's website (0 = no, 1 = yes)
+
+-   `limit`: If the product is limited edition (0 = no, 1 = yes)
+
+<br>
+
+<br>
+
+## Model setting
+
+### **Split the data**
+
+By using similar data for training and testing, we can **minimize the effects of data discrepancies and better understand the characteristics of the model**. After a model has been processed by using the training set, we test the model by making predictions against the test set.
+
+```{r}
+set.seed(6688)
+perfume_split <- initial_split(perfume, prop = 0.7, 
+                              strata = "level")
+perfume_train <- training(perfume_split)
+perfume_test <- testing(perfume_split)
+```
+
+<br>
+
+### Building the recipe
+
+```{r}
+perfume_recipe <- recipe(level ~ number_of_reviews + love + value_price +
+                          online + exclusives + limit, data=perfume_train) %>%
+  step_dummy(all_nominal_predictors()) %>% 
+  step_normalize(all_predictors())  %>% 
+  step_upsample(level, over_ratio = 0.25)
+```
+
+Take a look at our recipe:
+
+```{r}
+prep(perfume_recipe) %>% 
+  bake(new_data = perfume_train) %>% 
+  head()
+```
+
+<br>
+
+### K-Fold Cross Validation
+
+In each fold, training and the testing would be performed precisely once during this entire process. It helps us to avoid overfitting. As we know when a model is trained using all of the data in a single short and give the best performance accuracy. To resist this k-fold cross-validation helps us to build the model is a generalized one.
+
+In this project, I chose k = 5 fold because the data size is small.
+
+![](/Users/pippalin/Desktop/k-fold.png)
+
+```{r}
+perfume_folds <- vfold_cv(perfume_train, v = 5, strata = level)
+```
+
+<br>
+
+### Model Introduction
+
+For this project, I will fit four models:
+
+1.  **K Nearest Neighbors:**
+
+    KNN works by finding the distances between a query and all the examples in the data, selecting the specified number examples (K) closest to the query, then votes for the most frequent label (in the case of classification) or averages the labels (in the case of regression).
+
+    **Hyper-parameter:**
+
+    \- `k` : number of nearest neighbors to include in the majority of the voting process
+
+    ![](/Users/pippalin/Desktop/Knn_Article_image.png)
+
+    <br>
+
+2.  **Naive Bayes**
+
+    Naive Bayes methods are a set of supervised learning algorithms based on applying Bayes' theorem with the "naive" assumption of conditional independence between every pair of features given the value of the class variable.
+
+    ![](/Users/pippalin/Desktop/23385Capture6.png)
+
+    <br>
+
+3.  **Random Forest**
+
+    Since the random forest model is made up of multiple decision trees, it would be helpful to start by describing the decision tree algorithm briefly. Decision trees start with a basic question. These questions make up the decision nodes in the tree, acting as a means to split the data. Each question helps an individual to arrive at a final decision, which would be denoted by the leaf node. Observations that fit the criteria will follow the "Yes" branch and those that don't will follow the alternate path. Decision trees seek to find the best split to subset the data.
+
+    The random forest algorithm is an extension of the bagging method as it utilizes both bagging and feature randomness to create an uncorrelated forest of decision trees. Feature randomness, also known as feature bagging or "the random subspace method", generates a random subset of features, which ensures low correlation among decision trees.
+
+    **Hyper-parameter:**
+
+    \- `mtry` represents the amount of predictors that will be sampled randomly during the creation of the models\
+    - `trees` represents the amount of trees present in the random forest model\
+    - `min_n` represents the minimum amount of data values required to be in a tree node in order for it to be split further down the tree
+
+    ![](/Users/pippalin/Desktop/random-forest-diagram.svg)
+
+4.  **Gradient-Boosted Trees**
+
+    Gradient boosting is a methodology applied on top of another machine learning algorithm. Informally, **gradient boosting** involves two types of models:
+
+    -   a "weak" machine learning model, which is typically a decision tree.
+
+    -   a "strong" machine learning model, which is composed of multiple weak models.
+
+    In gradient boosting, at each step, a new weak model is trained to predict the "error" of the current strong model (which is called the **pseudo response**). We will detail "error" later. For now, assume "error" is the difference between the prediction and a regressive label. The weak model (that is, the "error") is then added to the strong model with a negative sign to reduce the error of the strong model.
+
+    **Hyper-parameter:**
+
+    \- `mtry` represents the amount of predictors that will be sampled randomly during the creation of the models\
+    - `trees` represents the amount of trees present in the random forest model\
+    - `learn_rate` represents the adjustment in the weights of our network with respect to the loss gradient descent
+
+    <br>
+
+    ![](/Users/pippalin/Desktop/assets_-LvBP1svpACTB1R1x_U4_-Lw6zezdliKWkGknCJ6R_-Lw70EB_T-Y3OCO-L_4o_image.webp){width="637"}
+
+<br>
+
+<br>
+
+### Model Fitting
+
+1.  **Create the model, create a workflow, and then set the grid of hyper-parameter**
+
+```{r}
+# KNN:
+# Build the model
+knn_mod <- nearest_neighbor(neighbors = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("kknn")
+
+# Create a workflow
+knn_wkflow <- workflow() %>% 
+  add_model(knn_mod) %>% 
+  add_recipe(perfume_recipe)
+
+# Set the grid
+neighbors_grid <- grid_regular(neighbors(range = c(1, 10)), levels = 10)
+
+
+
+# Naive Bayes
+# Build the model
+nb_mod <- naive_Bayes() %>% 
+  set_mode("classification") %>% 
+  set_engine("klaR") 
+
+# Create a workflow
+nb_wkflow <- workflow() %>% 
+  add_model(nb_mod) %>% 
+  add_recipe(perfume_recipe)
+
+
+
+# Random Forest
+# Build the model
+rf_mod <- rand_forest(mtry = tune(), 
+                           trees = tune(), 
+                           min_n = tune()) %>%
+  set_engine("ranger", importance = "impurity") %>% 
+  set_mode("classification")
+
+# Create a workflow
+rf_wf <- workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(perfume_recipe)
+
+# Set the grid
+rf_grid <- grid_regular(mtry(range = c(1, 6)), 
+                        trees(range = c(200, 600)),
+                        min_n(range = c(10, 20)),
+                        levels = 5)
+
+
+
+# Gradient-Boosted Trees
+# Build the model
+bt_model <- boost_tree(mtry = tune(), 
+                           trees = tune(), 
+                           learn_rate = tune()) %>%
+  set_engine("xgboost") %>% 
+  set_mode("classification") # importance = impurity by default
+
+# Create a workflow
+bt_wf <- workflow() %>% 
+  add_model(bt_model) %>% 
+  add_recipe(perfume_recipe)
+
+# Set the grid
+bt_grid <- grid_regular(mtry(range = c(1, 6)), 
+                        trees(range = c(200, 600)),
+                        learn_rate(range = c(-10, -1)),
+                        levels = 5)
+```
+
+<br>
+
+2.  **Fit the model**
+
+    With the model created, now we fit our training data into these models
+
+```{r, eval=FALSE}
+# KNN
+tune_knn <- tune_grid(
+  object = knn_wkflow, 
+  resamples = perfume_folds, 
+  grid = neighbors_grid
+)
+
+# Save the result as rda file
+save(tune_knn, file = "tune_knn.rda")
+```
+
+```{r}
+# Naive Bayes
+nb_fit <- fit_resamples(nb_wkflow, perfume_folds)
+
+# Save the result as rda file
+save(nb_fit, file = "nb_fit.rda")
+```
+
+```{r, eval=FALSE}
+# Random Forest
+tune_rf <- tune_grid(
+  rf_wf,
+  resamples = perfume_folds,
+  grid = rf_grid
+)
+
+# Save the result as rda file
+save(tune_rf, file = "tune_rf.rda")
+```
+
+```{r, eval=FALSE}
+# Gradient-Boosted Trees
+tune_bt <- tune_grid(
+  bt_wf,
+  resamples = perfume_folds,
+  grid = bt_grid
+)
+
+# Save the result as rda file
+save(tune_bt, file = "tune_bt.rda")
+```
+
+<br>
+
+<br>
+
+### Model Selection
+
+After we fit our training data into the models, we need to see how they perform on the training data. The metric we are using is called AUC:
+
+AUC - ROC curve is a performance measurement for the classification problems at various threshold settings. ROC is a probability curve and AUC represents the degree or measure of separability. It tells how much the model is capable of distinguishing between classes. Higher the AUC, the better the model is at predicting different classes. By analogy, the Higher the AUC, the better the model is at distinguishing between classes.
+
+![](/Users/pippalin/Desktop/Roc_curve.svg.png){width="300"}\
+
+<br>
+
+**KNN model:**
+
+```{r}
+load("/Users/pippalin/Desktop/Pippa_131_project/r_scripts/tune_knn.rda")
+autoplot(tune_knn) + theme_minimal()
+```
+
+Show best hyper-parameters:
+
+```{r warning=FALSE}
+show_best(tune_knn, n = 1)
+```
+
+<br>
+
+**Naive Bayes Model:**
+
+```{r warning=FALSE}
+collect_metrics(nb_fit)
+```
+
+<br>
+
+**Random Forest:**
+
+```{r}
+load("/Users/pippalin/Desktop/Pippa_131_project/r_scripts/tune_rf.rda")
+autoplot(tune_rf) + theme_minimal()
+```
+
+Show best hyper-parameters:
+
+```{r warning=FALSE}
+show_best(tune_rf, n = 1)
+```
+
+<br>
+
+**Gradient-Boosted Tree:**
+
+```{r}
+load("/Users/pippalin/Desktop/Pippa_131_project/r_scripts/tune_bt.rda")
+autoplot(tune_bt) + theme_minimal()
+```
+
+Show best hyper-parameters:
+
+```{r warning=FALSE}
+show_best(tune_bt, n = 1)
+```
+
+<br>
+
+<br>
+
+Let's make a table to present the RMSE and ROC AUC values of our best-fitting models (across folds) for each of these four models:
+
+|             | KNN       | Naive Bayes | Random Forest | Gradient Boosted Tree |
+|-------------|-----------|-------------|---------------|-----------------------|
+| **ROC AUC** | 0.6208846 | 0.7800816   | 0.8250041     | 0.8062273             |
+
+: <br>
+
+From the table, we can see that our best model is **Random Forest**. Remember we tuned some hyper-parameters for Random Forest:
+
+\- `mtry` represents the amount of predictors that will be sampled randomly during the creation of the models\
+- `trees` represents the amount of trees present in the random forest model\
+- `min_n` represents the minimum amount of data values required to be in a tree node in order for it to be split further down the tree
+
+<br>
+
+**Therefore, to specify, our best model is:**
+
+-   Random Forest with `mrty` = 4, `trees` = 200, `min_n` = 17
+
+<br>
+
+<br>
+
+**Now we need to finalize our workflow by fitting the whole training data to the models.**
+
+```{r warning=FALSE}
+best_class <- select_best(tune_rf)
+final_model <- finalize_workflow(rf_wf, best_class)
+final_model <- fit(final_model, perfume_train)
+```
+
+<br>
+
+**This vip plot shows the importance of the variables:**
+
+```{r}
+final_model %>% extract_fit_parsnip() %>% 
+  vip() +
+  theme_minimal()
+```
+
+We can see that `number of reviews` and `love` are way more important than other variables, which is reasonable: more comments and love shows more popularity of the perfume. However, it is interesting to see that number of comment is about two times more influential than love; it shows that for Sephora's perfume, you may rely more on review counts than how many people clicked like. Moreover, we can see that price is also an important factor for a perfume. The rest of the three variables are much less significant in the model.
+
+<br>
+
+## Model performance
+
+Let's use the model to make predictions for the testing data and take a look at its **testing ROC AUC**.
+
+```{r}
+final_model_test <- augment(final_model, 
+                               perfume_test) #%>% 
+      #select(level,starts_with(".pred"))
+
+roc_auc(final_model_test, truth = level, .pred_low:.pred_high)
+```
+
+Our model has a 0.8637638 roc_auc, which is even better than its performance on training data (0.8250041)!
+
+<br>
+
+We can also look at the roc curve and heat map for the three levels:
+
+```{r}
+roc_curve(final_model_test, truth = level, .pred_low:.pred_high) %>% 
+  autoplot()
+```
+
+```{r}
+conf_mat(final_model_test, truth = level, 
+         .pred_class) %>% autoplot(type = "heatmap")
+```
+
+From these two plots, we can see that the data does a better job on differentiating low rating perfume with the other ratings, but it fails to distinguish median and high rating perfume well. To be specific, it does slightly better on predicting high-rating perfume than median-rating perfume.
+
+A possible explanation of this is that the proportion of low-rating perfume in our raw dataset is extremely small and we replicated the same low-rating data many times. Therefore, the model is trained best on predicting these few observations. Moreover, there are still much less number of low-rating data in the testing set, so the model still does a way better job on predicting them.
+
+<br>
+
+<br>
+
+## Conclusion
+
+From this project, we learn that up to April 2020, the most powerful prediction model for Sephora perfume ratings is random forest with `mrty` = 4, `trees` = 200, and `min_n` = 17. However, although the roc_auc reached 0.8637638, it is affected by the imbalanced classes from the levels so it performs the best on low-rating perfumes. To improve prediction, we can scrape on the Sephora website again to obtain the latest data, and we can also modify our upsample proportion to relieve the affect caused by the imbalance.
+
+![](/Users/pippalin/Desktop/images.png){width="378"}

@@ -1,0 +1,156 @@
+---
+title: "Fianl Project Scratch"
+author: "Pippa Lin"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidymodels)
+library(ISLR)
+library(ISLR2)
+library(tidyverse)
+library(glmnet)
+library(modeldata)
+library(ggthemes)
+library(naniar) # to assess missing data patterns
+library(corrplot) # for a correlation plot
+library(patchwork) # for putting plots together
+library(rpart.plot)
+tidymodels_prefer()
+```
+
+### Import dataset
+
+```{r}
+data <- read.csv('/Users/pippalin/Desktop/PSTAT131/Project/sephora_website_dataset.csv')
+head(data)
+```
+
+```{r}
+data$rating <- as.factor(data$rating)
+data <- data %>%
+  mutate(level = forcats::fct_collapse(rating,
+                                        low = c(0,1,2),
+                                        median = c(2.5,3,3.5),
+                                        high = c(4,4.5,5))) %>% select(-c(rating))
+```
+
+```{r}
+data %>% 
+  ggplot(aes(x = level)) +
+  geom_bar() 
+```
+
+Remove unwanted variables:
+
+```{r}
+data <- data[,!names(data) %in% c("id", "name", "size","URL","MarketingFlags_content","brand","price")]
+dim(data) # 9168 observations with 8 variables
+```
+
+Too many brands, remove brand also.
+
+```{r}
+# unique(data$rating)
+count <- data.frame(table(data$category))
+
+count[order(-count$Freq),]
+```
+
+Choose perfume only
+
+```{r}
+# count unique values and store as a data frame
+counts <- data.frame(table(data$category))
+
+# sort data frame by frequency in descending order
+head(counts[order(-counts$Freq),])
+
+perfume <- data[data$category == 'Perfume' || data$category == 'Cologne'] 
+```
+
+```{r}
+table(perfume$rating)
+perfume$rating <- as.factor(perfume$rating)
+```
+
+Too many ratings, combine them to three types: low-rate, median-rate, high-rate
+
+```{r}
+perfume <- perfume %>%
+  mutate(level = forcats::fct_collapse(rating,
+                                        low = c(0,1,2),
+                                        median = c(2.5,3,3.5),
+                                        high = c(4,4.5,5))) 
+perfume <- perfume[,!names(data) %in% c("rating","limited_time_offer")]
+
+dim(perfume)
+```
+
+Now we have 665 observations and 9 predictors.
+
+**EDA: Since there is only one numeric value no need correlation**
+
+```{r}
+perfume %>% ggplot(aes(y = number_of_reviews,
+                          x = level)) +
+  stat_summary(fun = "mean", geom = "bar", 
+               position = "dodge") + theme_bw()
+```
+
+**Turn dummy variables to factors**
+
+```{r}
+perfume1 <- perfume %>% mutate(online = as.factor(online_only), 
+                              exclusives = as.factor(exclusive), 
+                              limit = as.factor(limited_edition))
+```
+
+```{r}
+perfume %>% 
+  ggplot(aes(x = level)) +
+  geom_bar() 
+```
+
+```{r}
+perfume1 %>% 
+  ggplot(aes(x = online)) +
+  geom_bar() 
+```
+
+```{r}
+perfume1 %>% ggplot() +
+  geom_histogram(aes(x = value_price), fill = 'red') + theme_bw() + xlim(15,350)
+```
+
+```{r}
+perfume1 %>% ggplot(aes(y = value_price, fill = online,
+                          x = level)) +
+  stat_summary(fun = "mean", geom = "bar", 
+               position = "dodge") + theme_bw()
+```
+
+```{r}
+perfume1 %>% ggplot(aes(y = value_price, fill = exclusives,
+                          x = level)) +
+  stat_summary(fun = "mean", geom = "bar", 
+               position = "dodge") + theme_bw()
+```
+
+```{r}
+perfume1 %>% ggplot(aes(y = value_price, fill = limit,
+                          x = level)) +
+  stat_summary(fun = "mean", geom = "bar", 
+               position = "dodge") + theme_bw()
+```
+
+Missing values:
+
+```{r}
+vis_miss(perfume1)
+```
